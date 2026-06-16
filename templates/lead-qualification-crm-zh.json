@@ -1,0 +1,276 @@
+{
+  "name": "AI 潛在客戶評分 CRM（中文版）",
+  "nodes": [
+    {
+      "id": "s0",
+      "name": "AI 潛在客戶評分 CRM（中文版）",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        60
+      ],
+      "parameters": {
+        "content": "# AI 潛在客戶評分 + CRM 自動化\n\n流程：\n1. Webhook 接收表單（姓名、Email、公司、訊息）\n2. 解析與正規化資料\n3. OpenAI 評分（1-100） → 結構化 JSON\n4. 解析 AI 回覆、合併客戶資料\n5. IF 路由（高分 → Slack 通知）\n6. Google Sheets 記錄所有潛在客戶\n\n憑證需求：OpenAI、Slack、Google Sheets"
+      }
+    },
+    {
+      "id": "n1",
+      "name": "Webhook — 客戶表單",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        260
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-form-zh",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "n2",
+      "name": "解析與正規化",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const body = typeof $json.body === \"string\" ? JSON.parse($json.body) : $json.body;\n\nconst lead = {\n  name: body.name || body.fullName || \"\",\n  email: body.email || \"\",\n  company: body.company || body.companyName || \"\",\n  phone: body.phone || body.phoneNumber || \"\",\n  message: body.message || body.notes || \"\",\n  source: body.source || body.leadSource || \"官網表單\",\n  budget: body.budget || \"\",\n  timeline: body.timeline || body.timeframe || \"\"\n};\n\nlead.prompt = `潛在客戶評分分析。只回傳合法 JSON：\n\n客戶：\n- 姓名：${lead.name}\n- Email：${lead.email}\n- 公司：${lead.company}\n- 訊息：${lead.message}\n- 預算：${lead.budget}\n- 時程：${lead.timeline}\n\n回傳格式：\n{\n  \"score\": <1-100>,\n  \"intent_level\": \"<high|medium|low>\",\n  \"qualification_reason\": \"<簡短理由>\",\n  \"recommended_pipeline\": \"<new_lead|qualified|opportunity>\",\n  \"suggested_priority\": \"<立即處理|本周聯繫|長期培育>\",\n  \"key_points\": [\"重點1\", \"重點2\"],\n  \"missing_info\": []\n}`;\n\nreturn { json: lead };\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "OpenAI — 評分與分類",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        680,
+        260
+      ],
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "你是 B2B 客戶評分 AI。依需求明確度(30分)、預算明確度(20分)、時程急迫性(20分)、決策者信號(15分)、公司資訊(15分) 評分。只回傳合法 JSON，不要 markdown。"
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 512
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "解析 AI 結果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst content = raw.message?.content || raw.choices?.[0]?.message?.content || \"\";\nconst match = content.match(/\\{[\\s\\S]*\\}/);\nconst parsed = match ? JSON.parse(match[0]) : { score: 0, intent_level: \"low\", recommended_pipeline: \"new_lead\" };\n\nreturn { json: { ...$input.first().json, ...parsed } };\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "高分判斷",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.score }}",
+              "rightValue": 70,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Slack 通知 — 高潛力客戶",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        80
+      ],
+      "parameters": {
+        "resource": "channel",
+        "operation": "send",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_ALERTS_CHANNEL }}",
+          "mode": "id"
+        },
+        "text": "=`:star2: 高潛力客戶！\n*${$json.name}* — ${$json.company}\n評分：${$json.score}/100 — ${$json.qualification_reason}\n優先級：${$json.suggested_priority}\nEmail：${$json.email}`"
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Google Sheets 記錄",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 2,
+      "position": [
+        920,
+        400
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEETS_ID }}",
+          "mode": "id"
+        },
+        "sheetName": "潛在客戶",
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        }
+      }
+    },
+    {
+      "id": "n8",
+      "name": "完成",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        400
+      ],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Webhook — 客戶表單": {
+      "main": [
+        [
+          {
+            "node": "解析與正規化",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析與正規化": {
+      "main": [
+        [
+          {
+            "node": "OpenAI — 評分與分類",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI — 評分與分類": {
+      "main": [
+        [
+          {
+            "node": "解析 AI 結果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析 AI 結果": {
+      "main": [
+        [
+          {
+            "node": "高分判斷",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "高分判斷": {
+      "main": [
+        [
+          {
+            "node": "Slack 通知 — 高潛力客戶",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Google Sheets 記錄",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack 通知 — 高潛力客戶": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets 記錄",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets 記錄": {
+      "main": [
+        [
+          {
+            "node": "完成",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "CRM"
+    },
+    {
+      "name": "AI"
+    },
+    {
+      "name": "繁體中文"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0",
+  "active": false
+}

@@ -1,0 +1,255 @@
+{
+  "name": "n8n \u00d7 Dify RAG Knowledge Base Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "# n8n + Dify Integration\nn8n HTTP Request \u2192 Dify API (RAG) \u2192 Process + Respond\n\nSetup: Dify API key in $env.DIFY_API_KEY\nDify base URL in $env.DIFY_BASE_URL"
+      },
+      "id": "s0",
+      "name": "n8n \u00d7 Dify \u2014 RAG Knowledge Base Integration",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dify-rag",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "n1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        240
+      ],
+      "webhookId": "c8f01a8f"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = typeof $json.body === 'string' ? JSON.parse($json.body) : $json.body;\n\nconst conversation_id = body.conversation_id || '';\nconst user = body.user || 'anonymous';\n\n// Build the Dify API payload\nreturn { json: {\n  query: body.query || body.question || body.message || '',\n  user: user,\n  conversation_id: conversation_id,\n  response_mode: 'blocking',\n  inputs: body.inputs || {},\n  // If it is a new conversation, leave conversation_id empty\n}};"
+      },
+      "id": "n2",
+      "name": "Parse User Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dify API requires specific headers\nconst apiKey = $env.DIFY_API_KEY;\nif (!apiKey) throw new Error('DIFY_API_KEY environment variable not set');\n\n$json._dify_headers = {\n  'Authorization': 'Bearer ' + apiKey,\n  'Content-Type': 'application/json'\n};\n$json._dify_url = ($env.DIFY_BASE_URL || 'https://api.dify.ai') + '/v1/chat-messages';\n\nreturn { json: $json };"
+      },
+      "id": "n3",
+      "name": "Build Dify Headers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json._dify_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json._dify_headers.Authorization }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $json.query, user: $json.user, conversation_id: $json.conversation_id, response_mode: $json.response_mode, inputs: $json.inputs }) }}"
+      },
+      "id": "n4",
+      "name": "Call Dify API (RAG)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        920,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const difyResp = $input.first().json;\n\n// Dify returns: { answer, conversation_id, id, metadata, ... }\nconst answer = difyResp.answer || difyResp.text || '';\nconst conversationId = difyResp.conversation_id || '';\nconst messageId = difyResp.id || '';\n\n// Extract sources if Dify returned them\nconst retrieverResources = difyResp.metadata?.retriever_resources || [];\nconst sources = retrieverResources.map(r => ({\n  doc: r.document_name || 'unknown',\n  segment: r.segment_position || 0,\n  content: (r.content || '').substring(0, 200)\n}));\n\nreturn {\n  json: {\n    answer: answer,\n    conversation_id: conversationId,\n    message_id: messageId,\n    sources: sources,\n    source_count: sources.length,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "n5",
+      "name": "Process Dify Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst response = {\n  success: true,\n  answer: data.answer || '(no answer from Dify)',\n  conversation_id: data.conversation_id,\n  sources: data.sources || [],\n  source_count: data.source_count || 0,\n  provider: 'dify-rag',\n  timestamp: data.timestamp\n};\n\nreturn { json: response };"
+      },
+      "id": "n6",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "n7",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1640,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  json: {\n    success: false,\n    error: 'Dify API call failed',\n    status_code: $json.statusCode || 0,\n    message: $json.message || JSON.stringify($json),\n    fallback: true,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "n8",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "n9",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        360
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse User Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse User Query": {
+      "main": [
+        [
+          {
+            "node": "Build Dify Headers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dify Headers": {
+      "main": [
+        [
+          {
+            "node": "Call Dify API (RAG)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Dify API (RAG)": {
+      "main": [
+        [
+          {
+            "node": "Process Dify Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Process Dify Response": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a0a6a9de"
+}

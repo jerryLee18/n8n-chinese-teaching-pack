@@ -1,0 +1,435 @@
+{
+  "name": "代理商任務接收與路由（中文版）",
+  "nodes": [
+    {
+      "id": "s0",
+      "name": "代理商任務接收與路由（中文版）",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        60
+      ],
+      "parameters": {
+        "content": "# 代理商任務接收與路由\n\n流程：\n1. 客戶透過表單/LINE/Email 提交需求\n2. OpenAI 分類任務類型（開發/設計/行銷/客服）\n3. 依類型路由到對應的 Slack 頻道\n4. 建立 Notion/Google Sheets 任務卡\n5. 回覆客戶確認訊息\n\n憑證需求：OpenAI、Slack、Google Sheets"
+      }
+    },
+    {
+      "id": "n1",
+      "name": "Webhook — 客戶需求",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        260
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "task-intake-zh",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "n2",
+      "name": "解析客戶需求",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const body = typeof $json.body === \"string\" ? JSON.parse($json.body) : $json.body;\n\nconst task = {\n  client_name: body.client_name || body.name || \"未具名\",\n  client_email: body.email || \"\",\n  client_company: body.company || \"\",\n  description: body.description || body.message || body.task || \"\",\n  urgency: body.urgency || body.priority || \"一般\",\n  source: body.source || \"官網表單\",\n  timestamp: new Date().toISOString()\n};\n\ntask.prompt = `任務分類分析。只回傳合法 JSON：\n\n客戶：${task.client_name}（${task.client_company}）\n需求：${task.description}\n急迫性：${task.urgency}\n\n回傳：\n{\n  \"category\": \"<開發|設計|行銷|客服|其他>\",\n  \"complexity\": \"<簡單|中等|複雜>\",\n  \"estimated_hours\": <預估工時>, \n  \"needs_clarification\": <true|false>,\n  \"suggested_assignee\": \"<建議指派對象或部門>\",\n  \"summary\": \"<一句話摘要>\"\n}`;\n\nreturn { json: task };\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "OpenAI — 任務分類",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        680,
+        260
+      ],
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "你是代理商任務分類 AI。依客戶需求內容分類為：開發（寫程式/API串接）、設計（UI/UX/視覺）、行銷（廣告/文案/SEO）、客服（問題回覆/售後）。只回傳合法 JSON。"
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 400
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "解析分類結果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst content = raw.message?.content || raw.choices?.[0]?.message?.content || \"\";\nconst match = content.match(/\\{[\\s\\S]*\\}/);\nconst parsed = match ? JSON.parse(match[0]) : { category: \"其他\", complexity: \"中等\" };\n\nconst result = { ...$input.first().json, ...parsed };\nresult.slack_text = `:inbox_tray: 新任務：*${parsed.summary}*\n客戶：${result.client_name}（${result.client_company}）\n分類：${parsed.category} | 複雜度：${parsed.complexity}\n預估工時：${parsed.estimated_hours}h\n急迫性：${result.urgency}`;\nreturn { json: result };\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "依類別路由",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1160,
+        260
+      ],
+      "parameters": {
+        "dataType": "string",
+        "value": "={{ $json.category }}",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "rightValue": "開發",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "rightValue": "設計",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "rightValue": "行銷",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "rightValue": "客服",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Slack — #開發頻道",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        60
+      ],
+      "parameters": {
+        "resource": "channel",
+        "operation": "send",
+        "channelId": {
+          "__rl": true,
+          "value": "#dev-tasks",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_text }}"
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Slack — #設計頻道",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        160
+      ],
+      "parameters": {
+        "resource": "channel",
+        "operation": "send",
+        "channelId": {
+          "__rl": true,
+          "value": "#design-tasks",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_text }}"
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Slack — #行銷頻道",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        260
+      ],
+      "parameters": {
+        "resource": "channel",
+        "operation": "send",
+        "channelId": {
+          "__rl": true,
+          "value": "#marketing-tasks",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_text }}"
+      }
+    },
+    {
+      "id": "n9",
+      "name": "Slack — #客服頻道",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        360
+      ],
+      "parameters": {
+        "resource": "channel",
+        "operation": "send",
+        "channelId": {
+          "__rl": true,
+          "value": "#support-tasks",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_text }}"
+      }
+    },
+    {
+      "id": "n10",
+      "name": "Google Sheets 任務紀錄",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        260
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEETS_ID }}",
+          "mode": "id"
+        },
+        "sheetName": "任務總表",
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        }
+      }
+    },
+    {
+      "id": "n11",
+      "name": "回覆確認予客戶",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1880,
+        260
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: \"received\", message: `感謝您的需求，我們已收到「${$json.summary}」。團隊將在 1 個工作天內回覆。` }) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook — 客戶需求": {
+      "main": [
+        [
+          {
+            "node": "解析客戶需求",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析客戶需求": {
+      "main": [
+        [
+          {
+            "node": "OpenAI — 任務分類",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI — 任務分類": {
+      "main": [
+        [
+          {
+            "node": "解析分類結果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析分類結果": {
+      "main": [
+        [
+          {
+            "node": "依類別路由",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "依類別路由": {
+      "main": [
+        [
+          {
+            "node": "Slack — #開發頻道",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack — #設計頻道",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack — #行銷頻道",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack — #客服頻道",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack — #開發頻道": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets 任務紀錄",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack — #設計頻道": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets 任務紀錄",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack — #行銷頻道": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets 任務紀錄",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack — #客服頻道": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets 任務紀錄",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets 任務紀錄": {
+      "main": [
+        [
+          {
+            "node": "回覆確認予客戶",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "代理商"
+    },
+    {
+      "name": "任務管理"
+    },
+    {
+      "name": "繁體中文"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0",
+  "active": false
+}

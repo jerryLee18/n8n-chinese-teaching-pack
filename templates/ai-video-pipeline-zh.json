@@ -1,0 +1,326 @@
+{
+  "name": "AI 影片製作管線（中文版）",
+  "nodes": [
+    {
+      "id": "s0",
+      "name": "AI 影片製作管線（中文版）",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        60
+      ],
+      "parameters": {
+        "content": "# AI 影片製作管線\n\n流程：\n1. 接收影片需求（主題、風格、長度）\n2. OpenAI 生成腳本\n3. 並行處理：AI 配音 + AI 圖片生成\n4. 組合影片\n5. 上傳雲端 → 回覆下載連結\n\n憑證需求：OpenAI、ElevenLabs/TTS、Cloud Storage"
+      }
+    },
+    {
+      "id": "n1",
+      "name": "Webhook — 影片需求",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        260
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "video-zh",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "n2",
+      "name": "解析需求",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const body = typeof $json.body === \"string\" ? JSON.parse($json.body) : $json.body;\n\nconst req = {\n  topic: body.topic || body.subject || \"\",\n  style: body.style || body.tone || \"專業\",\n  duration: body.duration || body.length || 60,\n  language: body.language || \"zh-TW\",\n  voice: body.voice || \"alloy\",\n  timestamp: new Date().toISOString()\n};\n\nreq.script_prompt = `請為以下主題撰寫 ${req.duration} 秒的影片腳本：${req.topic}。風格：${req.style}。使用繁體中文。\n\n回傳 JSON 格式：\n{\n  \"title\": \"影片標題\",\n  \"scenes\": [\n    { \"scene_id\": 1, \"narration\": \"旁白文字\", \"visual\": \"畫面描述\", \"duration_sec\": 10 }\n  ]\n}`;\n\nreturn { json: req };\n"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "OpenAI — 生成腳本",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        680,
+        260
+      ],
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "你是專業影片腳本撰寫 AI。產出結構化 JSON 腳本，包含場景編號、旁白文字、畫面描述、時間長度。"
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.script_prompt }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 2048
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "解析腳本 → 分拆場景",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst content = raw.message?.content || raw.choices?.[0]?.message?.content || \"\";\nconst match = content.match(/\\{[\\s\\S]*\\}/);\nconst script = match ? JSON.parse(match[0]) : { title: \"未命名\", scenes: [] };\n\n// Split scenes into individual items for parallel processing\nreturn (script.scenes || []).map(s => ({\n  json: {\n    title: script.title,\n    scene_id: s.scene_id,\n    narration: s.narration,\n    visual: s.visual,\n    duration_sec: s.duration_sec || 10\n  }\n}));\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "TTS — 生成旁白音檔",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1160,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/speech",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "tts-1"
+            },
+            {
+              "name": "voice",
+              "value": "={{ $json.voice || 'alloy' }}"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.narration }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "AI 生成畫面圖片",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1160,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/images/generations",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "dall-e-3"
+            },
+            {
+              "name": "prompt",
+              "value": "={{ $json.visual + ' — 16:9 cinematic quality, professional' }}"
+            },
+            {
+              "name": "n",
+              "value": 1
+            },
+            {
+              "name": "size",
+              "value": "1792x1024"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n7",
+      "name": "合併場景資料",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst scenes = items.map(item => ({\n  scene_id: item.json.scene_id,\n  narration: item.json.narration,\n  audio: item.json.audio_url || \"(TTS 已完成)\",\n  image: item.json.image_url || \"(圖片已生成)\",\n  duration: item.json.duration_sec\n}));\n\nreturn { json: { title: items[0]?.json?.title || \"影片\", scenes, total_scenes: scenes.length, status: \"ready_for_assembly\" } };\n"
+      }
+    },
+    {
+      "id": "n8",
+      "name": "回覆影片資料",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1640,
+        260
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'completed', title: $json.title, scenes: $json.total_scenes, message: '影片素材已生成完畢，請使用剪輯軟體組合。' }) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook — 影片需求": {
+      "main": [
+        [
+          {
+            "node": "解析需求",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析需求": {
+      "main": [
+        [
+          {
+            "node": "OpenAI — 生成腳本",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI — 生成腳本": {
+      "main": [
+        [
+          {
+            "node": "解析腳本 → 分拆場景",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析腳本 → 分拆場景": {
+      "main": [
+        [
+          {
+            "node": "TTS — 生成旁白音檔",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI 生成畫面圖片",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TTS — 生成旁白音檔": {
+      "main": [
+        [
+          {
+            "node": "合併場景資料",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI 生成畫面圖片": {
+      "main": [
+        [
+          {
+            "node": "合併場景資料",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "合併場景資料": {
+      "main": [
+        [
+          {
+            "node": "回覆影片資料",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "AI"
+    },
+    {
+      "name": "影片"
+    },
+    {
+      "name": "繁體中文"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0",
+  "active": false
+}
